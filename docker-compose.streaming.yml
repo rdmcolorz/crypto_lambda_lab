@@ -1,0 +1,243 @@
+version: "3.8"
+
+# =============================================================================
+# Crypto Lambda Analytics — Streaming Layer (Phase 2 Override)
+# =============================================================================
+# Adds the real-time / speed layer on top of the batch pipeline.
+#
+# Usage (batch + streaming together):
+#   docker compose -f docker-compose.yml -f docker-compose.streaming.yml up -d
+#   make up-full
+#
+# Adds: Kafka, Zookeeper, Schema Registry, Flink, Redis
+# =============================================================================
+
+x-common-env: &common-env
+  TZ: UTC
+
+services:
+
+  # ===========================================================================
+  # APACHE KAFKA + ZOOKEEPER
+  # ===========================================================================
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.3
+    container_name: zookeeper
+    hostname: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      <<: *common-env
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_log:/var/lib/zookeeper/log
+    networks:
+      - batch-net
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.3
+    container_name: kafka
+    hostname: kafka
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      <<: *common-env
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_NUM_PARTITIONS: 6
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - batch-net
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.5.3
+    container_name: schema-registry
+    hostname: schema-registry
+    ports:
+      - "8082:8081"
+    environment:
+      <<: *common-env
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    networks:
+      - batch-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.3
+    container_name: kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - batch-net
+    restart: "no"
+    entrypoint: ["/bin/bash", "-c"]
+    command: |
+      "
+      echo 'Creating Kafka topics...'
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+        --topic raw.prices --partitions 6 --replication-factor 1
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+        --topic raw.transactions --partitions 6 --replication-factor 1
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+        --topic raw.rewards --partitions 6 --replication-factor 1
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+        --topic aggregated.ohlcv --partitions 3 --replication-factor 1
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+        --topic aggregated.portfolio-pnl --partitions 3 --replication-factor 1
+
+      echo 'Topics created:'
+      kafka-topics --bootstrap-server kafka:29092 --list
+      "
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.1
+    container_name: kafka-ui
+    ports:
+      - "9021:8080"
+    environment:
+      <<: *common-env
+      KAFKA_CLUSTERS_0_NAME: crypto-lambda
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+    networks:
+      - batch-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # ===========================================================================
+  # APACHE FLINK (Speed Layer)
+  # ===========================================================================
+
+  flink-jobmanager:
+    image: flink:1.18.1-scala_2.12-java11
+    container_name: flink-jobmanager
+    hostname: flink-jobmanager
+    ports:
+      - "8083:8081"   # Flink Web UI
+    environment:
+      <<: *common-env
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        jobmanager.rpc.port: 6123
+        jobmanager.memory.process.size: 1600m
+        state.backend: rocksdb
+        state.checkpoints.dir: hdfs://namenode:9000/flink/checkpoints
+        state.savepoints.dir: hdfs://namenode:9000/flink/savepoints
+        execution.checkpointing.interval: 60000
+        execution.checkpointing.mode: EXACTLY_ONCE
+        restart-strategy: fixed-delay
+        restart-strategy.fixed-delay.attempts: 3
+        restart-strategy.fixed-delay.delay: 10s
+    volumes:
+      - ./speed-layer/target/scala-2.12:/opt/flink/usrlib:ro
+    networks:
+      - batch-net
+    depends_on:
+      namenode:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    command: jobmanager
+
+  flink-taskmanager:
+    image: flink:1.18.1-scala_2.12-java11
+    container_name: flink-taskmanager
+    hostname: flink-taskmanager
+    environment:
+      <<: *common-env
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        taskmanager.memory.process.size: 2048m
+        taskmanager.memory.managed.fraction: 0.4
+        state.backend: rocksdb
+        state.checkpoints.dir: hdfs://namenode:9000/flink/checkpoints
+    volumes:
+      - ./speed-layer/target/scala-2.12:/opt/flink/usrlib:ro
+    networks:
+      - batch-net
+    depends_on:
+      - flink-jobmanager
+    command: taskmanager
+
+  # ===========================================================================
+  # REDIS (Real-Time Serving Store)
+  # ===========================================================================
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis
+    hostname: redis
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+        --maxmemory 256mb
+        --maxmemory-policy allkeys-lru
+        --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - batch-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis-insight:
+    image: redis/redisinsight:2.40
+    container_name: redis-insight
+    ports:
+      - "5540:5540"
+    networks:
+      - batch-net
+    depends_on:
+      redis:
+        condition: service_healthy
+
+# =============================================================================
+# ADDITIONAL VOLUMES (streaming services)
+# =============================================================================
+
+volumes:
+  zookeeper_data:
+  zookeeper_log:
+  kafka_data:
+  redis_data:

@@ -1,0 +1,60 @@
+graph TB
+    subgraph "Data Sources"
+        A1[("Crypto Exchange APIs\n(Binance, CoinGecko)")] 
+        A2[("Simulated Transactions\nRewards / Trades")]
+    end
+
+    subgraph "Ingestion Layer"
+        B1["Kafka Producer\n(Python)"]
+        B2["Kafka Topics"]
+        B1 --> B2
+    end
+
+    A1 --> B1
+    A2 --> B1
+
+    subgraph "Speed Layer (Real-Time)"
+        direction TB
+        C1["Apache Flink\n(Scala/Java)"]
+        C2["Window Aggregations\n• 1-min / 5-min OHLCV\n• Live P&L per portfolio\n• Reward tier computation"]
+        C3[("Redis / HBase\nReal-Time Serving Store")]
+        C1 --> C2 --> C3
+    end
+
+    subgraph "Batch Layer (Offline)"
+        direction TB
+        D1["HDFS\n(Raw Data Lake)"]
+        D2["Apache Spark\n(Scala/Python)"]
+        D3["Star Schema\nData Warehouse"]
+        D4[("HDFS / Hive\nBatch Serving Store")]
+        D1 --> D2 --> D3 --> D4
+    end
+
+    subgraph "Orchestration"
+        E1["Apache Airflow\n• Daily batch jobs\n• Data quality checks\n• SLA monitoring"]
+    end
+
+    subgraph "Serving Layer"
+        F1["Query API\n(FastAPI / Python)"]
+        F2["Merge: Batch + Real-Time Views"]
+        F3["Dashboard\n(Grafana / Superset)"]
+        F1 --> F2 --> F3
+    end
+
+    B2 --> C1
+    B2 --> D1
+    E1 -.->|orchestrates| D2
+    E1 -.->|triggers| D3
+    C3 --> F2
+    D4 --> F2
+
+    style A1 fill:#1a1a2e,stroke:#e94560,color:#fff
+    style A2 fill:#1a1a2e,stroke:#e94560,color:#fff
+    style B2 fill:#16213e,stroke:#0f3460,color:#fff
+    style C1 fill:#0f3460,stroke:#e94560,color:#fff
+    style C3 fill:#533483,stroke:#e94560,color:#fff
+    style D1 fill:#0f3460,stroke:#e94560,color:#fff
+    style D2 fill:#0f3460,stroke:#e94560,color:#fff
+    style D4 fill:#533483,stroke:#e94560,color:#fff
+    style E1 fill:#e94560,stroke:#1a1a2e,color:#fff
+    style F3 fill:#533483,stroke:#e94560,color:#fff

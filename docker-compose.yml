@@ -1,0 +1,344 @@
+version: "3.8"
+
+# =============================================================================
+# Crypto Lambda Analytics — Batch Pipeline (Phase 1)
+# =============================================================================
+# Covers the BATCH layer only:
+#   Hadoop HDFS → Spark → Hive Metastore → Airflow → Grafana
+#
+# Phase 2 adds streaming: Kafka, Flink, Redis
+#   docker compose -f docker-compose.yml -f docker-compose.streaming.yml up -d
+#
+# Usage:
+#   docker compose up -d              # Start all services
+#   docker compose ps                 # Check status
+#   docker compose down -v            # Tear down + remove volumes
+#
+# Resource recommendation: 8GB+ RAM, 2+ CPU cores
+# =============================================================================
+
+x-common-env: &common-env
+  TZ: UTC
+
+# Shared Hadoop config for all Hadoop-ecosystem containers
+x-hadoop-env: &hadoop-env
+  CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+  CORE_CONF_hadoop_http_staticuser_user: root
+  HDFS_CONF_dfs_replication: 1
+  HDFS_CONF_dfs_permissions_enabled: "false"
+  HDFS_CONF_dfs_webhdfs_enabled: "true"
+
+services:
+
+  # ===========================================================================
+  # HADOOP HDFS
+  # ===========================================================================
+
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    hostname: namenode
+    ports:
+      - "9870:9870"   # NameNode Web UI
+      - "9000:9000"   # HDFS RPC
+    environment:
+      <<: [*common-env, *hadoop-env]
+      CLUSTER_NAME: crypto-lambda
+      HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check: "false"
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+    networks:
+      - batch-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9870/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    hostname: datanode
+    ports:
+      - "9864:9864"   # DataNode Web UI
+    environment:
+      <<: [*common-env, *hadoop-env]
+      HDFS_CONF_dfs_datanode_data_dir: file:///hadoop/dfs/data
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    networks:
+      - batch-net
+    depends_on:
+      namenode:
+        condition: service_healthy
+
+  # Creates HDFS directory structure on first startup
+  hdfs-init:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: hdfs-init
+    environment:
+      <<: *hadoop-env
+    networks:
+      - batch-net
+    depends_on:
+      namenode:
+        condition: service_healthy
+      datanode:
+        condition: service_started
+    restart: "no"
+    entrypoint: ["/bin/bash", "-c"]
+    command: |
+      "
+      echo 'Waiting for DataNode to register...'
+      sleep 15
+
+      echo 'Creating HDFS directory structure...'
+
+      # Raw zone — landing area for ingested data
+      hdfs dfs -mkdir -p /data/raw/prices
+      hdfs dfs -mkdir -p /data/raw/transactions
+      hdfs dfs -mkdir -p /data/raw/rewards
+
+      # Staging zone — cleaned and validated
+      hdfs dfs -mkdir -p /data/staging/prices
+      hdfs dfs -mkdir -p /data/staging/transactions
+      hdfs dfs -mkdir -p /data/staging/rewards
+
+      # Warehouse zone — star schema tables (Parquet via Hive)
+      hdfs dfs -mkdir -p /data/warehouse/fact_portfolio_daily
+      hdfs dfs -mkdir -p /data/warehouse/fact_reward_daily
+      hdfs dfs -mkdir -p /data/warehouse/dim_user
+      hdfs dfs -mkdir -p /data/warehouse/dim_asset
+      hdfs dfs -mkdir -p /data/warehouse/dim_date
+
+      # Quality reports
+      hdfs dfs -mkdir -p /data/quality_reports
+
+      hdfs dfs -chmod -R 777 /data
+
+      echo ''
+      echo '=== HDFS Structure ==='
+      hdfs dfs -ls -R /data/
+      echo ''
+      echo 'HDFS init complete.'
+      "
+
+  # ===========================================================================
+  # HIVE METASTORE (Postgres-backed, used by Spark SQL)
+  # ===========================================================================
+
+  hive-metastore-db:
+    image: postgres:15-alpine
+    container_name: hive-metastore-db
+    environment:
+      POSTGRES_DB: metastore
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive_password
+    volumes:
+      - hive_metastore_db:/var/lib/postgresql/data
+    networks:
+      - batch-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # APACHE SPARK (Official Docker Image)
+  # ===========================================================================
+  # Using the official Apache Spark image from Docker Hub (docker.io/apache/spark)
+  # Bitnami images were deprecated in Aug 2025 — versioned tags no longer available.
+  # Docs: https://hub.docker.com/r/apache/spark
+
+  spark-master:
+    image: apache/spark:3.5.3
+    container_name: spark-master
+    hostname: spark-master
+    ports:
+      - "8080:8080"   # Spark Master Web UI
+      - "7077:7077"   # Spark Master RPC
+      - "4040:4040"   # Spark Application UI (when a job is running)
+    environment:
+      <<: *common-env
+      SPARK_MASTER_HOST: spark-master
+      SPARK_MASTER_PORT: 7077
+      SPARK_MASTER_WEBUI_PORT: 8080
+      SPARK_NO_DAEMONIZE: "true"
+    volumes:
+      - ./batch-layer/src:/opt/spark-jobs:ro
+      - ./scripts:/opt/scripts:ro
+      - spark_logs:/tmp/spark-events
+    networks:
+      - batch-net
+    depends_on:
+      namenode:
+        condition: service_healthy
+      hive-metastore-db:
+        condition: service_healthy
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  spark-worker:
+    image: apache/spark:3.5.3
+    container_name: spark-worker
+    hostname: spark-worker
+    ports:
+      - "8081:8081"   # Spark Worker Web UI
+    environment:
+      <<: *common-env
+      SPARK_WORKER_CORES: 2
+      SPARK_WORKER_MEMORY: 2g
+      SPARK_WORKER_WEBUI_PORT: 8081
+      SPARK_NO_DAEMONIZE: "true"
+    volumes:
+      - ./batch-layer/src:/opt/spark-jobs:ro
+      - ./scripts:/opt/scripts:ro
+    networks:
+      - batch-net
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://spark-master:7077
+
+  # ===========================================================================
+  # APACHE AIRFLOW (Orchestration)
+  # ===========================================================================
+
+  airflow-db:
+    image: postgres:15-alpine
+    container_name: airflow-db
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow_password
+    volumes:
+      - airflow_db:/var/lib/postgresql/data
+    networks:
+      - batch-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  airflow-init:
+    image: apache/airflow:2.8.1-python3.10
+    container_name: airflow-init
+    environment: &airflow-env
+      <<: *common-env
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow_password@airflow-db:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: "81HqDtbqAywKSOumSha3BhWNOdQ26slT6K0YaZeZyPs="
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    networks:
+      - batch-net
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        airflow db migrate
+        airflow users create \
+          --username admin \
+          --password admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com || true
+        echo "Airflow initialized."
+
+  airflow-webserver:
+    image: apache/airflow:2.8.1-python3.10
+    container_name: airflow-webserver
+    hostname: airflow-webserver
+    ports:
+      - "8085:8080"   # Airflow Web UI (8085 avoids Spark UI conflict)
+    environment:
+      <<: *airflow-env
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    volumes:
+      - ./orchestration/dags:/opt/airflow/dags:ro
+      - ./orchestration/plugins:/opt/airflow/plugins:ro
+      - airflow_logs:/opt/airflow/logs
+    networks:
+      - batch-net
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    command: webserver
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  airflow-scheduler:
+    image: apache/airflow:2.8.1-python3.10
+    container_name: airflow-scheduler
+    environment:
+      <<: *airflow-env
+    volumes:
+      - ./orchestration/dags:/opt/airflow/dags:ro
+      - ./orchestration/plugins:/opt/airflow/plugins:ro
+      - airflow_logs:/opt/airflow/logs
+    networks:
+      - batch-net
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    command: scheduler
+
+  # ===========================================================================
+  # GRAFANA (Visualization)
+  # ===========================================================================
+
+  grafana:
+    image: grafana/grafana:10.3.1
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      <<: *common-env
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - batch-net
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+
+volumes:
+  namenode_data:
+  datanode_data:
+  hive_metastore_db:
+  spark_logs:
+  airflow_db:
+  airflow_logs:
+  grafana_data:
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+
+networks:
+  batch-net:
+    driver: bridge
+    name: crypto-batch-network
