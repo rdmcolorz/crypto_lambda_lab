@@ -114,7 +114,7 @@ services:
       # Quality reports
       hdfs dfs -mkdir -p /data/quality_reports
 
-      hdfs dfs -chmod -R 777 /data
+      hdfs dfs -chmod -R 755 /data
 
       echo ''
       echo '=== HDFS Structure ==='
@@ -133,7 +133,7 @@ services:
     environment:
       POSTGRES_DB: metastore
       POSTGRES_USER: hive
-      POSTGRES_PASSWORD: hive_password
+      POSTGRES_PASSWORD: ${HIVE_METASTORE_DB_PASSWORD:?Set HIVE_METASTORE_DB_PASSWORD in .env}
     volumes:
       - hive_metastore_db:/var/lib/postgresql/data
     networks:
@@ -218,7 +218,7 @@ services:
     environment:
       POSTGRES_DB: airflow
       POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow_password
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:?Set AIRFLOW_DB_PASSWORD in .env}
     volumes:
       - airflow_db:/var/lib/postgresql/data
     networks:
@@ -235,8 +235,8 @@ services:
     environment: &airflow-env
       <<: *common-env
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow_password@airflow-db:5432/airflow
-      AIRFLOW__CORE__FERNET_KEY: "81HqDtbqAywKSOumSha3BhWNOdQ26slT6K0YaZeZyPs="
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD:?Set AIRFLOW_DB_PASSWORD in .env}@airflow-db:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?Set AIRFLOW_FERNET_KEY in .env}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
     networks:
@@ -251,7 +251,7 @@ services:
         airflow db migrate
         airflow users create \
           --username admin \
-          --password admin \
+          --password "${AIRFLOW_ADMIN_PASSWORD:?Set AIRFLOW_ADMIN_PASSWORD in .env}" \
           --firstname Admin \
           --lastname User \
           --role Admin \
@@ -266,7 +266,7 @@ services:
       - "8085:8080"   # Airflow Web UI (8085 avoids Spark UI conflict)
     environment:
       <<: *airflow-env
-      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
     volumes:
       - ./orchestration/dags:/opt/airflow/dags:ro
       - ./orchestration/plugins:/opt/airflow/plugins:ro
@@ -314,8 +314,8 @@ services:
       - "3000:3000"
     environment:
       <<: *common-env
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in .env}
     volumes:
       - grafana_data:/var/lib/grafana
     networks:

@@ -33,8 +33,10 @@ up: ## Start batch pipeline (HDFS, Spark, Airflow, Hive, Grafana)
 	@echo "  HDFS DataNode:   http://localhost:9864"
 	@echo "  Spark Master:    http://localhost:8080"
 	@echo "  Spark Worker:    http://localhost:8081"
-	@echo "  Airflow:         http://localhost:8085  (admin/admin)"
-	@echo "  Grafana:         http://localhost:3000   (admin/admin)"
+	@echo "  Airflow:         http://localhost:8085"
+	@echo "  Grafana:         http://localhost:3000"
+	@echo ""
+	@echo "  Credentials are in your .env file (see .env.example)"
 	@echo ""
 
 # ---------------------------------------------------------------------------
@@ -48,7 +50,7 @@ up-full: ## Start full stack (batch + Kafka, Flink, Redis)
 	@echo "  --- Batch Layer ---"
 	@echo "  HDFS NameNode:   http://localhost:9870"
 	@echo "  Spark Master:    http://localhost:8080"
-	@echo "  Airflow:         http://localhost:8085  (admin/admin)"
+	@echo "  Airflow:         http://localhost:8085"
 	@echo ""
 	@echo "  --- Streaming Layer ---"
 	@echo "  Kafka UI:        http://localhost:9021"
@@ -56,7 +58,9 @@ up-full: ## Start full stack (batch + Kafka, Flink, Redis)
 	@echo "  Redis Insight:   http://localhost:5540"
 	@echo ""
 	@echo "  --- Shared ---"
-	@echo "  Grafana:         http://localhost:3000   (admin/admin)"
+	@echo "  Grafana:         http://localhost:3000"
+	@echo ""
+	@echo "  Credentials are in your .env file (see .env.example)"
 	@echo ""
 
 down: ## Stop batch services

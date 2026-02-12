@@ -1,1 +1,42 @@
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Python virtual environments
+venv/
+env/
+ENV/
 crypto_venv/
+.venv/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Spark / Hadoop local artifacts
+metastore_db/
+derby.log
+spark-warehouse/
