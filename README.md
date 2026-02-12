@@ -490,12 +490,6 @@ open http://localhost:8080    # Airflow UI
 
 ---
 
-## Author
-
-**[Your Name]**
-
-Data Engineer | [LinkedIn](https://linkedin.com/in/yourprofile) | [GitHub](https://github.com/yourusername)
-
 Built as a portfolio project demonstrating production-grade data platform engineering with a focus on real-time and offline processing for crypto/fintech use cases.
 
 ---
